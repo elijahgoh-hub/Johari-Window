@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --braze-orange: #FFA524;
+    --braze-orange-light: #FFD4BC;
+    --braze-orange-dark: #E9371F;
+    --braze-pink: #FFA4FB;
+    --braze-pink-light: #F8D3E8;
+    --braze-pink-dark: #91186E;
+    --braze-purple: #801ED7;
+    --braze-purple-light: #C9C4FF;
+    --braze-purple-dark: #300266;
+  }
+
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    background-color: #FAFAFD;
+    color: #300266;
+  }
+}
+
+/* Custom scrollbars for clean corporate panels */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(128, 30, 215, 0.2);
+  border-radius: 9999px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 30, 215, 0.4);
+}
+
