@@ -1,4 +1,7 @@
-import { JohariAdjective, LeadershipCompetency, CompetencyCategory } from '../types/johari';
+// `import type` matters here: this module is also loaded by the serverless
+// functions as native ESM, where a surviving runtime import of a types-only
+// file would fail to resolve.
+import type { JohariAdjective, LeadershipCompetency, CompetencyCategory } from '../types/johari.js';
 
 /**
  * Braze Leadership Competencies (Capabilities Model)

@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { updateSelfSelection } from '../../../lib/sessionService';
-import { handler, methodNotAllowed, ownerToken, send, sessionId } from '../../../lib/http';
+import { updateSelfSelection } from '../../../lib/sessionService.js';
+import { handler, methodNotAllowed, ownerToken, send, sessionId } from '../../../lib/http.js';
 
 /** PUT /api/sessions/:id/self — update the leader's own selection. Owner only. */
 export default handler(async (req: VercelRequest, res: VercelResponse) => {

@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { addPeerReview } from '../../../lib/sessionService';
-import { handler, methodNotAllowed, send, sessionId } from '../../../lib/http';
+import { addPeerReview } from '../../../lib/sessionService.js';
+import { handler, methodNotAllowed, send, sessionId } from '../../../lib/http.js';
 
 /**
  * POST /api/sessions/:id/peer — submit an anonymous peer review.

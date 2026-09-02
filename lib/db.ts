@@ -1,5 +1,5 @@
 import { MongoClient, type Collection } from 'mongodb';
-import type { AdjectiveSelection } from '../src/types/johari';
+import type { AdjectiveSelection } from '../src/types/johari.js';
 
 /**
  * MongoDB access layer.

@@ -1,7 +1,7 @@
-import { createHash, randomBytes, timingSafeEqual } from 'crypto';
-import { sessions, type SessionDoc } from './db';
-import { JOHARI_ADJECTIVES } from '../src/data/johariAdjectives';
-import type { AdjectiveSelection } from '../src/types/johari';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { sessions, type SessionDoc } from './db.js';
+import { JOHARI_ADJECTIVES } from '../src/data/johariAdjectives.js';
+import type { AdjectiveSelection } from '../src/types/johari.js';
 
 /**
  * Framework-agnostic session logic, shared by the Vercel functions in /api

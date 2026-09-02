@@ -1,5 +1,5 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import type { Result } from './sessionService';
+import type { Result } from './sessionService.js';
 
 /** Reads the owner token from the header, falling back to a query param. */
 export function ownerToken(req: VercelRequest): string | undefined {

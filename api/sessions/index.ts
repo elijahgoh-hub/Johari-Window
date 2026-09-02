@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { createSession } from '../../lib/sessionService';
-import { handler, methodNotAllowed, send } from '../../lib/http';
+import { createSession } from '../../lib/sessionService.js';
+import { handler, methodNotAllowed, send } from '../../lib/http.js';
 
 /** POST /api/sessions — create a session, returns the sessionId + ownerToken. */
 export default handler(async (req: VercelRequest, res: VercelResponse) => {

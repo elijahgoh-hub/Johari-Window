@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { deleteSession, getFullSession, getPublicSession } from '../../../lib/sessionService';
-import { handler, methodNotAllowed, ownerToken, send, sessionId } from '../../../lib/http';
+import { deleteSession, getFullSession, getPublicSession } from '../../../lib/sessionService.js';
+import { handler, methodNotAllowed, ownerToken, send, sessionId } from '../../../lib/http.js';
 
 /**
  * GET    /api/sessions/:id  — without a token: leader name + response count only.

@@ -9,7 +9,7 @@ import {
   getPublicSession,
   updateSelfSelection,
   type Result,
-} from './lib/sessionService';
+} from './lib/sessionService.js';
 
 /**
  * Local development server only. Production runs on Vercel serverless
