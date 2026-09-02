@@ -93,7 +93,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               id="navbar-copy-dashboard-link-btn"
               onClick={handleCopyDashboardLink}
-              title="Save or copy your private dashboard link to return anytime"
+              title="Copy your private dashboard link. It contains your access token — treat it like a password and never send it to peers."
               className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-[#46098c] hover:bg-[#801ED7] text-[#C9C4FF] hover:text-white border border-[#801ED7]/50 transition text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
             >
               {copiedLink ? (

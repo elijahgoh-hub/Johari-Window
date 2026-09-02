@@ -15,8 +15,8 @@ import {
 import { sessionStore, StoredSessionData } from '../utils/sessionStore';
 
 interface StartAssessmentViewProps {
-  onStart: (leaderName: string, leaderTitle: string) => void;
-  onResumeSession?: (sessionId: string) => void;
+  onStart: (leaderName: string, leaderTitle: string) => void | Promise<void>;
+  onResumeSession?: (sessionId: string, ownerToken?: string) => void;
 }
 
 export const StartAssessmentView: React.FC<StartAssessmentViewProps> = ({ 
@@ -28,30 +28,52 @@ export const StartAssessmentView: React.FC<StartAssessmentViewProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [manualSessionId, setManualSessionId] = useState('');
   const [savedSessions, setSavedSessions] = useState<StoredSessionData[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setSavedSessions(sessionStore.getAllSavedSessions());
   }, []);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || isSubmitting) return;
     setIsSubmitting(true);
-    onStart(name.trim(), title.trim() || 'Executive Leader');
-  };
-
-  const handleResumeManual = (e: React.FormEvent) => {
-    e.preventDefault();
-    const cleanId = manualSessionId.trim().replace(/^.*[?&]session=/, '').replace(/[&#].*$/, '');
-    if (!cleanId) return;
-    if (onResumeSession) {
-      onResumeSession(cleanId);
+    setError(null);
+    try {
+      await onStart(name.trim(), title.trim() || 'Executive Leader');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not create the session.');
+      setIsSubmitting(false);
     }
   };
 
-  const handleDeleteSaved = (e: React.MouseEvent, id: string) => {
+  /**
+   * Accepts a full dashboard URL or a bare session id. Resuming needs the
+   * owner token, so a pasted link is the reliable path — a bare id only works
+   * if this browser already holds the token.
+   */
+  const handleResumeManual = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = manualSessionId.trim();
+    if (!raw) return;
+
+    let sessionId = raw;
+    let ownerToken: string | undefined;
+
+    const query = raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : raw;
+    const params = new URLSearchParams(query);
+    if (params.get('session')) {
+      sessionId = params.get('session') as string;
+      ownerToken = params.get('token') || undefined;
+    }
+
+    if (!sessionId) return;
+    onResumeSession?.(sessionId, ownerToken);
+  };
+
+  const handleDeleteSaved = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    sessionStore.deleteSession(id);
+    await sessionStore.deleteSession(id);
     setSavedSessions(sessionStore.getAllSavedSessions());
   };
 
@@ -132,6 +154,12 @@ export const StartAssessmentView: React.FC<StartAssessmentViewProps> = ({
                 </li>
               </ul>
             </div>
+
+            {error && (
+              <p className="text-xs font-semibold text-[#E9371F] bg-[#FFF6F0] border border-[#FFA524] rounded-xl px-4 py-3">
+                {error}
+              </p>
+            )}
 
             <button
               id="btn-start-assessment"

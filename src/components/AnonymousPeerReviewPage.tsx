@@ -30,6 +30,7 @@ export const AnonymousPeerReviewPage: React.FC<AnonymousPeerReviewPageProps> = (
   const [peerRole, setPeerRole] = useState<string>('Peer / Colleague');
   const [notes, setNotes] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
   // Toggle between clean 5x11 grid vs full dictionary with categories & definitions
   const [viewMode, setViewMode] = useState<'grid' | 'dictionary'>('grid');
@@ -56,6 +57,7 @@ export const AnonymousPeerReviewPage: React.FC<AnonymousPeerReviewPageProps> = (
     if (selectedAdjectives.length !== 6 || isSubmitting) return;
 
     setIsSubmitting(true);
+    setSubmitError(null);
     const submission: AdjectiveSelection = {
       userId: `peer-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       source: 'peer',
@@ -70,8 +72,14 @@ export const AnonymousPeerReviewPage: React.FC<AnonymousPeerReviewPageProps> = (
       await onSubmit(submission);
       setIsSubmitted(true);
     } catch (err) {
+      // Never show the thank-you screen on failure — the feedback was not saved
+      // and the peer needs the chance to retry.
       console.error('Submission error:', err);
-      setIsSubmitted(true);
+      setSubmitError(
+        err instanceof Error
+          ? err.message
+          : 'Your feedback could not be submitted. Please try again.'
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -382,6 +390,12 @@ export const AnonymousPeerReviewPage: React.FC<AnonymousPeerReviewPageProps> = (
               <span>{isSubmitting ? 'Submitting...' : 'Submit Anonymous Assessment'}</span>
             </button>
           </div>
+
+          {submitError && (
+            <p className="text-xs font-semibold text-[#E9371F] bg-[#FFF6F0] border border-[#FFA524] rounded-xl px-4 py-3">
+              {submitError} Your responses are still selected above — press submit to retry.
+            </p>
+          )}
         </form>
       </div>
 

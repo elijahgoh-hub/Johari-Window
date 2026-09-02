@@ -33,7 +33,8 @@ export const InvitePeersModal: React.FC<InvitePeersModalProps> = ({
 
   if (!isOpen) return null;
 
-  const inviteUrl = sessionStore.getPeerInviteUrl(sessionId, leaderName, leaderTitle);
+  // Carries the session id only — no owner token, so peers cannot open the dashboard.
+  const inviteUrl = sessionStore.getPeerInviteUrl(sessionId);
 
   const handleCopyLink = () => {
     navigator.clipboard.writeText(inviteUrl);
