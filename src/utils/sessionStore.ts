@@ -1,7 +1,22 @@
 import { UserSession, AdjectiveSelection } from '../types/johari';
 
+/**
+ * Client-side session access.
+ *
+ * All persistence lives in MongoDB behind /api. localStorage is used only as
+ * a convenience cache and to remember which sessions *this* browser owns.
+ *
+ * SECURITY MODEL — capability URLs, no login:
+ *   Peer invite link      ?session=<id>&mode=peer          → submit only
+ *   Leader dashboard link ?session=<id>&token=<ownerToken>  → read results, edit, delete
+ * Holding the peer link does not let you view results, and only the owner
+ * token can modify a session.
+ */
+
 const SESSION_PREFIX = 'johari_session_';
+const OWNER_TOKEN_PREFIX = 'johari_owner_';
 const ACTIVE_SESSION_KEY = 'johari_active_session_id';
+const POLL_INTERVAL_MS = 10000;
 
 export interface StoredSessionData {
   session: UserSession;
@@ -10,320 +25,358 @@ export interface StoredSessionData {
   updatedAt: number;
 }
 
-// Broadcast Channel for live cross-tab syncing
+/** Metadata visible to a peer holding the invite link. */
+export interface PublicSessionInfo {
+  id: string;
+  leaderName: string;
+  leaderTitle: string;
+  peerCount: number;
+}
+
+interface ApiSession {
+  id: string;
+  leaderName: string;
+  leaderTitle: string;
+  peerCount: number;
+  createdAt: number;
+  selfSelection?: AdjectiveSelection;
+  peerSelections?: AdjectiveSelection[];
+  updatedAt?: number;
+}
+
+const hasWindow = () => typeof window !== 'undefined';
+
+// Live cross-tab syncing
 let syncChannel: BroadcastChannel | null = null;
 try {
-  if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+  if (hasWindow() && 'BroadcastChannel' in window) {
     syncChannel = new BroadcastChannel('johari_sync_channel');
   }
-} catch (e) {
-  // Fallback
+} catch {
+  syncChannel = null;
+}
+
+function toStored(api: ApiSession): StoredSessionData {
+  return {
+    session: {
+      id: api.id,
+      leaderName: api.leaderName,
+      leaderTitle: api.leaderTitle,
+      createdTimestamp: api.createdAt,
+    },
+    selfSelection:
+      api.selfSelection ?? {
+        userId: `self-${api.id}`,
+        source: 'self',
+        selectedAdjectives: [],
+        notes: '',
+      },
+    peerSelections: api.peerSelections ?? [],
+    updatedAt: api.updatedAt ?? api.createdAt,
+  };
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit & { ownerToken?: string } = {}
+): Promise<T> {
+  const { ownerToken: token, headers, ...rest } = init;
+
+  const res = await fetch(path, {
+    ...rest,
+    headers: {
+      ...(rest.body ? { 'Content-Type': 'application/json' } : {}),
+      // Sent as a header rather than a query param so the token stays out of
+      // server access logs.
+      ...(token ? { 'x-owner-token': token } : {}),
+      ...headers,
+    },
+  });
+
+  if (!res.ok) {
+    let message = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // non-JSON error body
+    }
+    throw new Error(message);
+  }
+
+  return res.json() as Promise<T>;
 }
 
 export const sessionStore = {
-  // Generate a random clean session ID
-  generateSessionId(): string {
-    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
-      return crypto.randomUUID().slice(0, 10);
+  // -------------------------------------------------------- owner tokens
+
+  /** The owner token for a session, from the URL if present, else localStorage. */
+  getOwnerToken(sessionId: string): string | null {
+    if (!hasWindow()) return null;
+
+    const fromUrl = new URLSearchParams(window.location.search).get('token');
+    const active = new URLSearchParams(window.location.search).get('session');
+    if (fromUrl && active === sessionId) {
+      // Opening the dashboard link on a new device registers ownership here.
+      this.setOwnerToken(sessionId, fromUrl);
+      return fromUrl;
     }
-    return 'johari_' + Math.random().toString(36).substring(2, 8);
+
+    return localStorage.getItem(`${OWNER_TOKEN_PREFIX}${sessionId}`);
   },
 
-  // Save session to localStorage and sync to server
-  saveSessionData(sessionId: string, data: StoredSessionData): void {
-    if (typeof window === 'undefined') return;
-    try {
-      localStorage.setItem(`${SESSION_PREFIX}${sessionId}`, JSON.stringify(data));
-      localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
-
-      if (syncChannel) {
-        syncChannel.postMessage({ type: 'SESSION_UPDATED', sessionId, data });
-      }
-
-      // Async sync to server
-      fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      }).catch((err) => console.warn('Server sync background notice:', err));
-    } catch (e) {
-      console.error('Failed to save session', e);
-    }
+  setOwnerToken(sessionId: string, token: string): void {
+    if (!hasWindow()) return;
+    localStorage.setItem(`${OWNER_TOKEN_PREFIX}${sessionId}`, token);
   },
 
-  // Get session synchronously from localStorage
+  /** True when this browser holds the owner token — i.e. can see the dashboard. */
+  isOwner(sessionId: string): boolean {
+    return !!this.getOwnerToken(sessionId);
+  },
+
+  // -------------------------------------------------------- local cache
+
   getSessionData(sessionId: string): StoredSessionData | null {
-    if (typeof window === 'undefined') return null;
+    if (!hasWindow()) return null;
     try {
       const raw = localStorage.getItem(`${SESSION_PREFIX}${sessionId}`);
-      if (!raw) return null;
-      return JSON.parse(raw);
-    } catch (e) {
-      console.error('Failed to load session from localStorage', e);
+      return raw ? (JSON.parse(raw) as StoredSessionData) : null;
+    } catch {
       return null;
     }
   },
 
-  // Fetch session from server (with localStorage fallback)
-  async fetchSessionFromServer(sessionId: string): Promise<StoredSessionData | null> {
+  cacheSessionData(sessionId: string, data: StoredSessionData): void {
+    if (!hasWindow()) return;
     try {
-      const res = await fetch(`/api/sessions/${sessionId}`);
-      if (res.ok) {
-        const serverData: StoredSessionData = await res.json();
-        // Update local cache
-        if (typeof window !== 'undefined' && serverData && serverData.session) {
-          localStorage.setItem(`${SESSION_PREFIX}${sessionId}`, JSON.stringify(serverData));
-        }
-        return serverData;
-      }
-    } catch (err) {
-      console.warn('Could not fetch session from server, using local fallback:', err);
+      localStorage.setItem(`${SESSION_PREFIX}${sessionId}`, JSON.stringify(data));
+      syncChannel?.postMessage({ type: 'SESSION_UPDATED', sessionId, data });
+    } catch {
+      // storage full or unavailable — the server remains the source of truth
     }
-    return this.getSessionData(sessionId);
   },
 
-  // Get active session ID
   getActiveSessionId(): string | null {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem(ACTIVE_SESSION_KEY);
+    return hasWindow() ? localStorage.getItem(ACTIVE_SESSION_KEY) : null;
   },
 
-  // Set active session ID
   setActiveSessionId(sessionId: string): void {
-    if (typeof window === 'undefined') return;
-    localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+    if (hasWindow()) localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
   },
 
-  // Clear active session ID
   clearActiveSessionId(): void {
-    if (typeof window === 'undefined') return;
-    localStorage.removeItem(ACTIVE_SESSION_KEY);
+    if (hasWindow()) localStorage.removeItem(ACTIVE_SESSION_KEY);
   },
 
-  // Get all saved sessions on this device
+  /** Sessions this browser owns, newest first. */
   getAllSavedSessions(): StoredSessionData[] {
-    if (typeof window === 'undefined') return [];
-    try {
-      const sessions: StoredSessionData[] = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith(SESSION_PREFIX)) {
-          const raw = localStorage.getItem(key);
-          if (raw) {
-            try {
-              const parsed = JSON.parse(raw);
-              if (parsed && parsed.session && parsed.session.id) {
-                sessions.push(parsed);
-              }
-            } catch (e) {
-              // skip corrupted
-            }
-          }
-        }
+    if (!hasWindow()) return [];
+    const out: StoredSessionData[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(SESSION_PREFIX)) continue;
+      try {
+        const parsed = JSON.parse(localStorage.getItem(key) || '');
+        if (parsed?.session?.id && this.isOwner(parsed.session.id)) out.push(parsed);
+      } catch {
+        // skip corrupted entry
       }
-      return sessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    } catch (e) {
-      return [];
+    }
+    return out.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  },
+
+  // -------------------------------------------------------- reads
+
+  /** Full results. Requires the owner token; returns null if this browser lacks it. */
+  async fetchSessionFromServer(sessionId: string): Promise<StoredSessionData | null> {
+    const token = this.getOwnerToken(sessionId);
+    if (!token) return null;
+
+    try {
+      const api = await request<ApiSession>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        ownerToken: token,
+      });
+      const data = toStored(api);
+      this.cacheSessionData(sessionId, data);
+      return data;
+    } catch (err) {
+      console.warn('Could not load session from server:', err);
+      return this.getSessionData(sessionId);
     }
   },
 
-  // Delete a session
-  deleteSession(sessionId: string): void {
-    if (typeof window === 'undefined') return;
+  /** Leader name and response count only — what a peer is allowed to see. */
+  async fetchPublicSession(sessionId: string): Promise<PublicSessionInfo | null> {
     try {
-      localStorage.removeItem(`${SESSION_PREFIX}${sessionId}`);
-      if (this.getActiveSessionId() === sessionId) {
-        localStorage.removeItem(ACTIVE_SESSION_KEY);
-      }
-    } catch (e) {
-      console.error('Failed to delete session', e);
+      const api = await request<ApiSession>(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      return {
+        id: api.id,
+        leaderName: api.leaderName,
+        leaderTitle: api.leaderTitle,
+        peerCount: api.peerCount,
+      };
+    } catch {
+      return null;
     }
   },
 
-  // Create a new session
-  createSession(leaderName: string, leaderTitle: string = 'Executive Leader'): StoredSessionData {
-    const sessionId = this.generateSessionId();
-    const newSession: UserSession = {
-      id: sessionId,
-      leaderName: leaderName.trim(),
-      leaderTitle: leaderTitle.trim() || 'Executive Leader',
-      createdTimestamp: Date.now(),
-    };
+  // -------------------------------------------------------- writes
 
-    const selfSelection: AdjectiveSelection = {
-      userId: `self-${sessionId}`,
-      source: 'self',
-      selectedAdjectives: [],
-      notes: '',
-      submittedAt: Date.now(),
-    };
+  /** Creates a session server-side and stores the returned owner token. */
+  async createSession(
+    leaderName: string,
+    leaderTitle: string = 'Executive Leader'
+  ): Promise<StoredSessionData> {
+    const result = await request<{
+      sessionId: string;
+      ownerToken: string;
+      session: ApiSession;
+    }>('/api/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ leaderName, leaderTitle }),
+    });
 
-    const data: StoredSessionData = {
-      session: newSession,
-      selfSelection,
-      peerSelections: [],
-      updatedAt: Date.now(),
-    };
+    this.setOwnerToken(result.sessionId, result.ownerToken);
+    this.setActiveSessionId(result.sessionId);
 
-    this.saveSessionData(sessionId, data);
+    const data = toStored(result.session);
+    this.cacheSessionData(result.sessionId, data);
     return data;
   },
 
-  // Add an anonymous peer review to a session (local + server sync)
-  async addPeerReview(
-    sessionId: string, 
-    peerSubmission: AdjectiveSelection, 
-    leaderName?: string, 
-    leaderTitle?: string
-  ): Promise<boolean> {
-    // 1. Post to Server API directly
-    try {
-      const res = await fetch(`/api/sessions/${sessionId}/peer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+  /**
+   * Saves the leader's own selection. Owner only.
+   *
+   * Only the self-selection is sent — peer feedback is never part of the
+   * payload, so a stale tab cannot overwrite collected responses.
+   */
+  async updateSelfSelection(
+    sessionId: string,
+    selection: AdjectiveSelection
+  ): Promise<StoredSessionData> {
+    const token = this.getOwnerToken(sessionId);
+    if (!token) throw new Error('You do not have permission to edit this session');
+
+    const api = await request<ApiSession>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/self`,
+      {
+        method: 'PUT',
+        ownerToken: token,
         body: JSON.stringify({
-          peerSubmission,
-          leaderName,
-          leaderTitle,
+          selectedAdjectives: selection.selectedAdjectives,
+          notes: selection.notes,
         }),
-      });
-
-      if (res.ok) {
-        const result = await res.json();
-        if (result && result.session) {
-          localStorage.setItem(`${SESSION_PREFIX}${sessionId}`, JSON.stringify(result.session));
-          if (syncChannel) {
-            syncChannel.postMessage({ type: 'SESSION_UPDATED', sessionId, data: result.session });
-          }
-          return true;
-        }
       }
-    } catch (e) {
-      console.warn('Direct server peer submission notice:', e);
-    }
+    );
 
-    // 2. Local fallback if offline
-    let existing = this.getSessionData(sessionId);
-    if (!existing) {
-      existing = {
-        session: {
-          id: sessionId,
-          leaderName: leaderName?.trim() || 'Leader',
-          leaderTitle: leaderTitle?.trim() || 'Executive Leader',
-          createdTimestamp: Date.now(),
-        },
-        selfSelection: {
-          userId: `self-${sessionId}`,
-          source: 'self',
-          selectedAdjectives: [],
-          notes: '',
-          submittedAt: Date.now(),
-        },
-        peerSelections: [],
-        updatedAt: Date.now(),
-      };
-    }
-
-    const sanitizedSubmission: AdjectiveSelection = {
-      userId: `peer-${Math.random().toString(36).substring(2, 8)}`,
-      source: 'peer',
-      peerName: 'Anonymous Reviewer',
-      peerRole: peerSubmission.peerRole || 'Peer / Colleague',
-      selectedAdjectives: peerSubmission.selectedAdjectives,
-      notes: peerSubmission.notes?.trim() || '',
-      submittedAt: Date.now(),
-    };
-
-    existing.peerSelections.push(sanitizedSubmission);
-    existing.updatedAt = Date.now();
-    this.saveSessionData(sessionId, existing);
-    return true;
+    const data = toStored(api);
+    this.cacheSessionData(sessionId, data);
+    return data;
   },
 
-  // Get peer shareable URL with explicit leader name & title in query
-  getPeerInviteUrl(sessionId: string, leaderName?: string, leaderTitle?: string): string {
-    if (typeof window === 'undefined') return `/johari/${sessionId}`;
+  /** Submits an anonymous peer review. Needs only the session id. */
+  async addPeerReview(
+    sessionId: string,
+    peerSubmission: AdjectiveSelection
+  ): Promise<{ peerCount: number }> {
+    return request<{ peerCount: number }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/peer`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          selectedAdjectives: peerSubmission.selectedAdjectives,
+          peerRole: peerSubmission.peerRole,
+          notes: peerSubmission.notes,
+        }),
+      }
+    );
+  },
+
+  /** Deletes the session on the server. Owner only. */
+  async deleteSession(sessionId: string): Promise<void> {
+    const token = this.getOwnerToken(sessionId);
+
+    if (token) {
+      try {
+        await request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+          method: 'DELETE',
+          ownerToken: token,
+        });
+      } catch (err) {
+        console.warn('Server delete failed:', err);
+      }
+    }
+
+    if (!hasWindow()) return;
+    localStorage.removeItem(`${SESSION_PREFIX}${sessionId}`);
+    localStorage.removeItem(`${OWNER_TOKEN_PREFIX}${sessionId}`);
+    if (this.getActiveSessionId() === sessionId) this.clearActiveSessionId();
+  },
+
+  // -------------------------------------------------------- links
+
+  /**
+   * Peer invite link. Carries the session id only — no owner token, so a peer
+   * cannot switch to the dashboard view and read results.
+   */
+  getPeerInviteUrl(sessionId: string): string {
+    if (!hasWindow()) return `/?session=${sessionId}&mode=peer`;
     const url = new URL(window.location.href);
+    url.search = '';
     url.searchParams.set('session', sessionId);
     url.searchParams.set('mode', 'peer');
-    if (leaderName) {
-      url.searchParams.set('leader', leaderName.trim());
-    }
-    if (leaderTitle) {
-      url.searchParams.set('title', leaderTitle.trim());
-    }
-    url.searchParams.delete('view');
     return url.toString();
   },
 
-  // Get leader dashboard URL
+  /** Leader dashboard link. Contains the owner token — treat it as a password. */
   getLeaderDashboardUrl(sessionId: string): string {
-    if (typeof window === 'undefined') return `/dashboard/${sessionId}`;
+    const token = this.getOwnerToken(sessionId);
+    if (!hasWindow()) return `/?session=${sessionId}`;
     const url = new URL(window.location.href);
+    url.search = '';
     url.searchParams.set('session', sessionId);
-    url.searchParams.delete('mode');
-    url.searchParams.delete('leader');
-    url.searchParams.delete('title');
+    if (token) url.searchParams.set('token', token);
     url.searchParams.set('view', 'matrix');
     return url.toString();
   },
 
-  // Subscribe to updates across tabs and poll server periodically
-  subscribeToUpdates(sessionId: string, callback: (data: StoredSessionData) => void): () => void {
-    if (typeof window === 'undefined') return () => {};
+  // -------------------------------------------------------- live updates
 
-    // 1. Initial fetch from server
-    this.fetchSessionFromServer(sessionId).then((data) => {
-      if (data) callback(data);
-    });
+  /** Polls the server for new peer responses and syncs across tabs. */
+  subscribeToUpdates(
+    sessionId: string,
+    callback: (data: StoredSessionData) => void
+  ): () => void {
+    if (!hasWindow() || !this.isOwner(sessionId)) return () => {};
 
-    // 2. Storage event listener (same origin tabs)
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === `${SESSION_PREFIX}${sessionId}` && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue);
-          callback(parsed);
-        } catch (err) {
-          // ignore
-        }
-      }
+    let stopped = false;
+
+    const refresh = async () => {
+      if (stopped || document.visibilityState === 'hidden') return;
+      const data = await this.fetchSessionFromServer(sessionId);
+      if (data && !stopped) callback(data);
     };
 
-    // 3. Broadcast channel listener
+    refresh();
+    const intervalId = setInterval(refresh, POLL_INTERVAL_MS);
+
     const handleChannelMessage = (e: MessageEvent) => {
-      if (e.data && e.data.type === 'SESSION_UPDATED' && e.data.sessionId === sessionId) {
+      if (e.data?.type === 'SESSION_UPDATED' && e.data.sessionId === sessionId) {
         callback(e.data.data);
       }
     };
 
-    // 4. Polling interval from server every 3 seconds for instant multi-device / multi-browser updates
-    const intervalId = setInterval(async () => {
-      const serverData = await this.fetchSessionFromServer(sessionId);
-      if (serverData) {
-        callback(serverData);
-      }
-    }, 3000);
-
-    // 5. On window focus, refresh immediately
-    const handleFocus = () => {
-      this.fetchSessionFromServer(sessionId).then((data) => {
-        if (data) callback(data);
-      });
-    };
-
-    window.addEventListener('storage', handleStorage);
-    window.addEventListener('focus', handleFocus);
-    if (syncChannel) {
-      syncChannel.addEventListener('message', handleChannelMessage);
-    }
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    syncChannel?.addEventListener('message', handleChannelMessage);
 
     return () => {
+      stopped = true;
       clearInterval(intervalId);
-      window.removeEventListener('storage', handleStorage);
-      window.removeEventListener('focus', handleFocus);
-      if (syncChannel) {
-        syncChannel.removeEventListener('message', handleChannelMessage);
-      }
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+      syncChannel?.removeEventListener('message', handleChannelMessage);
     };
   },
 };

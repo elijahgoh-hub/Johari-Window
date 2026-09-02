@@ -1,8 +1,17 @@
 node_modules/
-build/
 dist/
+build/
 coverage/
+.vercel/
+.claude/settings.local.json
+
+# Local env files — never commit connection strings
+.env
+.env.*
+!.env.example
+
+# Legacy local file store from the AI Studio build
+sessions_db.json
+
 .DS_Store
 *.log
-.env*
-!.env.example

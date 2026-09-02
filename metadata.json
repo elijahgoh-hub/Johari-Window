@@ -2,5 +2,5 @@
   "name": "Johari Window Leadership Navigator",
   "description": "Executive self-awareness and 360 peer feedback platform mapping the 55 Johari Window adjectives to Leadership Competency Models.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

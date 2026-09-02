@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { UserSession, AdjectiveSelection } from './types/johari';
 import { calculateJohariResults } from './utils/johariCalculator';
-import { sessionStore, StoredSessionData } from './utils/sessionStore';
+import { sessionStore, StoredSessionData, PublicSessionInfo } from './utils/sessionStore';
 import { Navbar } from './components/Navbar';
 import { StartAssessmentView } from './components/StartAssessmentView';
 import { SelfSelectionView } from './components/SelfSelectionView';
@@ -17,18 +17,26 @@ import { InvitePeersModal } from './components/InvitePeersModal';
 export default function App() {
   // Read initial URL params
   const getUrlParams = () => {
-    if (typeof window === 'undefined') return { sessionId: null, mode: null, view: null, leader: null, title: null };
+    if (typeof window === 'undefined') return { sessionId: null, mode: null, view: null, leader: null, title: null, token: null };
     const params = new URLSearchParams(window.location.search);
     return {
       sessionId: params.get('session'),
       mode: params.get('mode'), // 'peer'
       view: params.get('view') as 'matrix' | 'self' | 'competencies' | 'insights' | 'dictionary' | 'start' | null,
+      // Legacy AI Studio invite links carried the leader name in the URL.
       leader: params.get('leader') || params.get('name'),
       title: params.get('title'),
+      token: params.get('token'),
     };
   };
 
   const initialParams = getUrlParams();
+
+  // Opening a dashboard link registers the owner token on this device before
+  // any render reads it.
+  if (initialParams.sessionId && initialParams.token) {
+    sessionStore.setOwnerToken(initialParams.sessionId, initialParams.token);
+  }
 
   // Session state
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() => {
@@ -59,6 +67,17 @@ export default function App() {
     return 'matrix';
   });
 
+  // Peer-mode metadata (leader name + response count). Peers are only ever
+  // served this, never the aggregated results.
+  const [peerInfo, setPeerInfo] = useState<PublicSessionInfo | null>(null);
+  const [isPeerInfoLoading, setIsPeerInfoLoading] = useState<boolean>(
+    initialParams.mode === 'peer'
+  );
+
+  // Error surfaces
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   // Modals
   const [isInvitePeersOpen, setIsInvitePeersOpen] = useState(false);
   const [isDictionaryOpen, setIsDictionaryOpen] = useState(false);
@@ -73,6 +92,8 @@ export default function App() {
       url.searchParams.set('session', sessionId);
     } else {
       url.searchParams.delete('session');
+      // Never leave an owner token pointing at no session.
+      url.searchParams.delete('token');
     }
 
     if (mode) {
@@ -92,10 +113,32 @@ export default function App() {
     window.history.replaceState({}, '', url.toString());
   }, []);
 
-  // Fetch session data from server and listen to real-time updates
+  // Peer mode: fetch only the public metadata for this session
   useEffect(() => {
-    if (!activeSessionId) {
-      setSessionData(null);
+    if (!isPeerMode || !activeSessionId) {
+      setIsPeerInfoLoading(false);
+      return;
+    }
+
+    let isSubscribed = true;
+    setIsPeerInfoLoading(true);
+
+    sessionStore.fetchPublicSession(activeSessionId).then((info) => {
+      if (!isSubscribed) return;
+      setPeerInfo(info);
+      setIsPeerInfoLoading(false);
+    });
+
+    return () => {
+      isSubscribed = false;
+    };
+  }, [isPeerMode, activeSessionId]);
+
+  // Leader mode: fetch full results and poll for new peer responses.
+  // Both calls are no-ops unless this browser holds the owner token.
+  useEffect(() => {
+    if (!activeSessionId || isPeerMode) {
+      if (!activeSessionId) setSessionData(null);
       return;
     }
 
@@ -118,14 +161,15 @@ export default function App() {
       isSubscribed = false;
       unsubscribe();
     };
-  }, [activeSessionId]);
+  }, [activeSessionId, isPeerMode]);
 
   // Handle URL change (back/forward or external links)
   useEffect(() => {
     const handlePopState = () => {
-      const { sessionId, mode, view } = getUrlParams();
+      const { sessionId, mode, view, token } = getUrlParams();
       setIsPeerMode(mode === 'peer');
       if (sessionId) {
+        if (token) sessionStore.setOwnerToken(sessionId, token);
         setActiveSessionId(sessionId);
         sessionStore.fetchSessionFromServer(sessionId).then((data) => {
           if (data) {
@@ -151,9 +195,10 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Start new assessment flow
-  const handleStartNewAssessment = (leaderName: string, leaderTitle: string) => {
-    const newSessionData = sessionStore.createSession(leaderName, leaderTitle);
+  // Start new assessment flow. Throws on failure so the start screen can
+  // surface the error rather than silently appearing to succeed.
+  const handleStartNewAssessment = async (leaderName: string, leaderTitle: string) => {
+    const newSessionData = await sessionStore.createSession(leaderName, leaderTitle);
     setActiveSessionId(newSessionData.session.id);
     setSessionData(newSessionData);
     setIsPeerMode(false);
@@ -162,57 +207,53 @@ export default function App() {
     updateUrl(newSessionData.session.id, null, 'self');
   };
 
-  // Resume an existing session
-  const handleResumeSession = async (sessionId: string) => {
-    const serverData = await sessionStore.fetchSessionFromServer(sessionId);
-    const data = serverData || sessionStore.getSessionData(sessionId);
-    if (data) {
-      setActiveSessionId(sessionId);
-      setSessionData(data);
-      sessionStore.setActiveSessionId(sessionId);
-      setIsPeerMode(false);
-      setShowStartScreen(false);
-      const nextTab = (!data.selfSelection || data.selfSelection.selectedAdjectives.length === 0) ? 'self' : 'matrix';
-      setActiveTab(nextTab);
-      updateUrl(sessionId, null, nextTab);
-    } else {
-      // If not in database yet, create container
-      const newSessionData = sessionStore.createSession('Leader', 'Executive Leader');
-      setActiveSessionId(sessionId);
-      setSessionData(newSessionData);
-      setIsPeerMode(false);
-      setShowStartScreen(false);
-      setActiveTab('self');
-      updateUrl(sessionId, null, 'self');
+  /**
+   * Resume an existing session. Requires the owner token — either already on
+   * this device or supplied via a pasted dashboard link.
+   */
+  const handleResumeSession = async (sessionId: string, ownerToken?: string) => {
+    if (ownerToken) sessionStore.setOwnerToken(sessionId, ownerToken);
+
+    const data = await sessionStore.fetchSessionFromServer(sessionId);
+    if (!data) {
+      setResumeError(
+        sessionStore.isOwner(sessionId)
+          ? 'That session could not be loaded. It may have been deleted.'
+          : 'You need the full dashboard link (the one containing "token=") to reopen this session.'
+      );
+      return;
     }
+
+    setResumeError(null);
+    setActiveSessionId(sessionId);
+    setSessionData(data);
+    sessionStore.setActiveSessionId(sessionId);
+    setIsPeerMode(false);
+    setShowStartScreen(false);
+    const nextTab = !data.selfSelection?.selectedAdjectives?.length ? 'self' : 'matrix';
+    setActiveTab(nextTab);
+    updateUrl(sessionId, null, nextTab);
   };
 
-  // Update self-selection
+  // Update self-selection. Optimistic locally, then persisted server-side.
   const handleUpdateSelfSelection = (updatedSelection: AdjectiveSelection) => {
     if (!activeSessionId || !sessionData) return;
 
-    const updatedData: StoredSessionData = {
-      ...sessionData,
-      selfSelection: updatedSelection,
-      updatedAt: Date.now(),
-    };
+    setSessionData({ ...sessionData, selfSelection: updatedSelection, updatedAt: Date.now() });
 
-    setSessionData(updatedData);
-    sessionStore.saveSessionData(activeSessionId, updatedData);
+    sessionStore.updateSelfSelection(activeSessionId, updatedSelection).catch((err) => {
+      console.error('Failed to save self-selection:', err);
+      setSaveError('Your latest change could not be saved. Check your connection.');
+    });
   };
 
-  // Submit peer review (async)
-  const handlePeerReviewSubmit = async (
-    peerSubmission: AdjectiveSelection, 
-    leaderName?: string, 
-    leaderTitle?: string
-  ) => {
-    const targetSessionId = activeSessionId || initialParams.sessionId || 'active_session';
-    await sessionStore.addPeerReview(targetSessionId, peerSubmission, leaderName, leaderTitle);
-    const updated = await sessionStore.fetchSessionFromServer(targetSessionId);
-    if (updated) {
-      setSessionData(updated);
-    }
+  // Submit an anonymous peer review against the session in the invite link.
+  const handlePeerReviewSubmit = async (peerSubmission: AdjectiveSelection) => {
+    const targetSessionId = activeSessionId || initialParams.sessionId;
+    if (!targetSessionId) throw new Error('This invite link is missing its session id.');
+
+    const { peerCount } = await sessionStore.addPeerReview(targetSessionId, peerSubmission);
+    setPeerInfo((prev) => (prev ? { ...prev, peerCount } : prev));
   };
 
   // Switch tabs
@@ -233,24 +274,72 @@ export default function App() {
     updateUrl(null, null, null);
   };
 
-  // 1. Peer Feedback Mode View (Strictly Anonymous, with optional Dictionary Page Toggle)
+  // 1. Peer Feedback Mode View (Strictly Anonymous). Served only the public
+  // metadata for this session — never the aggregated results.
   if (isPeerMode) {
-    const currentParams = getUrlParams();
-    const leaderName = sessionData?.session.leaderName || currentParams.leader || 'Your Colleague';
-    const leaderTitle = sessionData?.session.leaderTitle || currentParams.title || 'Executive Leader';
+    if (isPeerInfoLoading) {
+      return (
+        <div className="min-h-screen bg-[#FAFAFD] flex items-center justify-center">
+          <div className="flex items-center gap-3 text-[#300266]">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#FFA524] animate-pulse" />
+            <span className="text-sm font-bold">Loading feedback request…</span>
+          </div>
+        </div>
+      );
+    }
+
+    // Legacy invite links carried the leader name in the URL; fall back to it.
+    const leaderName = peerInfo?.leaderName || initialParams.leader;
+    const leaderTitle = peerInfo?.leaderTitle || initialParams.title || 'Executive Leader';
+
+    if (!leaderName) {
+      return (
+        <div className="min-h-screen bg-[#FAFAFD] flex items-center justify-center px-4">
+          <div className="max-w-md w-full bg-white rounded-2xl p-8 border border-gray-200 shadow-xl text-center space-y-3">
+            <h1 className="text-lg font-extrabold text-[#300266]">This link isn't valid</h1>
+            <p className="text-sm text-gray-600">
+              The feedback request may have expired or been deleted. Ask the person who
+              sent it for a fresh link.
+            </p>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <AnonymousPeerReviewPage
         leaderName={leaderName}
         leaderTitle={leaderTitle}
-        onSubmit={async (sub) => {
-          await handlePeerReviewSubmit(sub, leaderName, leaderTitle);
-        }}
+        onSubmit={handlePeerReviewSubmit}
       />
     );
   }
 
-  // 2. Start Assessment Screen (If no session exists or user clicked New Assessment)
+  // 2. Access guard — a session is addressed but this browser has no owner
+  // token, so it must not see the dashboard.
+  if (activeSessionId && !sessionStore.isOwner(activeSessionId)) {
+    return (
+      <div className="min-h-screen bg-[#FAFAFD] flex items-center justify-center px-4">
+        <div className="max-w-md w-full bg-white rounded-2xl p-8 border border-gray-200 shadow-xl text-center space-y-4">
+          <h1 className="text-lg font-extrabold text-[#300266]">Dashboard link required</h1>
+          <p className="text-sm text-gray-600">
+            Viewing results needs the private dashboard link — the one containing
+            <code className="mx-1 px-1.5 py-0.5 rounded bg-[#FAFAFD] border border-gray-200 text-xs">token=</code>
+            that you saved when you created the assessment. A peer invite link alone
+            can't open it.
+          </p>
+          <button
+            onClick={handleResetToStart}
+            className="w-full py-3 px-6 rounded-xl bg-[#FFA524] hover:bg-[#E9371F] text-[#300266] hover:text-white font-extrabold text-sm transition cursor-pointer"
+          >
+            Back to start
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Start Assessment Screen (If no session exists or user clicked New Assessment)
   if (showStartScreen || !sessionData) {
     return (
       <div className="min-h-screen bg-[#FAFAFD] text-[#300266] font-sans selection:bg-[#FFA524] selection:text-[#300266]">
@@ -270,8 +359,15 @@ export default function App() {
         </header>
 
         <main>
-          <StartAssessmentView 
-            onStart={handleStartNewAssessment} 
+          {resumeError && (
+            <div className="max-w-2xl mx-auto px-4 pt-6">
+              <p className="text-xs font-semibold text-[#E9371F] bg-[#FFF6F0] border border-[#FFA524] rounded-xl px-4 py-3">
+                {resumeError}
+              </p>
+            </div>
+          )}
+          <StartAssessmentView
+            onStart={handleStartNewAssessment}
             onResumeSession={handleResumeSession}
           />
         </main>
@@ -302,6 +398,19 @@ export default function App() {
         onOpenInvitePeers={() => setIsInvitePeersOpen(true)}
         onOpenNewSession={handleResetToStart}
       />
+
+      {saveError && (
+        <div className="fixed bottom-16 right-4 z-50 max-w-sm bg-white border border-[#FFA524] shadow-xl rounded-xl px-4 py-3 flex items-start gap-3">
+          <span className="text-xs font-semibold text-[#E9371F]">{saveError}</span>
+          <button
+            onClick={() => setSaveError(null)}
+            className="text-xs font-bold text-gray-400 hover:text-[#300266] cursor-pointer"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1">
